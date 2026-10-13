@@ -133,6 +133,27 @@ int MPIIO_Access(const char *path, int mode, aiori_mod_opt_t *module_options)
       return MPI_SUCCESS;
     }
     mpiio_options_t * param = (mpiio_options_t*) module_options;
+
+    // First perform a stat to check whether the path exists and, if so,
+    // whether it is a directory.
+    //
+    // MPI-IO has no notion of a directory, and a path that does not exist
+    // yet cannot be told apart from one that is about to be created as a
+    // directory -- e.g. the per-rank directories PrependDir() creates for
+    // "-F -u", which only ever get backend mkdir()/access() calls, never
+    // create()/open(). Falling through to MPI_File_open() for such a path
+    // is also erroneous per the MPI standard (no MPI_MODE_CREATE given for
+    // a file that may not exist) and its behavior is MPI-implementation
+    // dependent. So for both "doesn't exist" and "is a directory", defer
+    // entirely to POSIX access() semantics rather than attempting MPI-IO.
+    struct stat st;
+    int ret = stat(path, &st);
+
+    if (ret != 0 || S_ISDIR(st.st_mode))
+        return aiori_posix_access(path, mode, module_options);
+
+    // otherwise, this is an existing regular file: check access through
+    // the MPI-IO interface.
     MPI_File fd;
     int mpi_mode = MPI_MODE_UNIQUE_OPEN;
     MPI_Info mpiHints = MPI_INFO_NULL;
@@ -146,19 +167,6 @@ int MPIIO_Access(const char *path, int mode, aiori_mod_opt_t *module_options)
 
     SetHints(&mpiHints, param->hintsFileName);
 
-    // first perform a stat to check whether this is a directory
-    struct stat st;
-    int ret = stat(path, &st);
-
-    if (ret == 0)
-    {
-        // if this is a directory, redirect to aiori_posix_access
-        if (S_ISDIR(st.st_mode))
-            return aiori_posix_access(path, mode, module_options);
-    }
-
-    // otherwise check if we can access the file with MPI (we also verify MPI
-    // handles a file that doesn't exist or otherwise fails in stat above)
     ret = MPI_File_open(MPI_COMM_SELF, path, mpi_mode, mpiHints, &fd);
 
     if (!ret)
